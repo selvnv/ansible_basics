@@ -1,0 +1,11 @@
+---
+- hosts: vbox_hosts
+  become: true
+  tasks:
+  - name: Show hostname
+    ansible.builtin.command: hostname
+    register: hostname_result
+
+  - name: Test message
+    ansible.builtin.debug:
+      msg: "Hostname is: {{ hostname_result.stdout }}"

@@ -184,7 +184,67 @@ pipx install --include-deps ansible
 Настройка виртуальной машины
 
 
-# Connection
+# Запуск сценария
 
 Для подключения к виртуальной машине можно использоавть ключ для дефолтного пользователя `vagrant`, который располагается в директории проекта `.vagrant/machines/default/virtualbox/`
 
+Утилита ssh предъявляет требования безопасности для приватного ключа. Для корректной настройки прав к ключу и его использования при работе Ansible из под WSL, секретный ключ перемещен в домашнюю директорию с ограничением прав доступа только для владельца файла:
+
+```bash
+cp .vagrant/machines/default/virtualbox/private_key ~/.ssh/debian_private_key
+chmod 600 ~/.ssh/debian_private_key
+ls -l ~/.ssh/debian_private_key
+-rw------- 1 vladimir vladimir 400 Feb 10 18:19 /home/vladimir/.ssh/debian_private_key
+```
+
+Проверка доступности хоста:
+```bash
+$ ansible vbox_hosts -i ./hosts -u vagrant --private-key=/home/vladimir/.ssh/debian_private_key -m ping
+[WARNING]: Host '192.168.33.10' is using the discovered Python interpreter at '/usr/bin/python3.11', but future installation of another Python interpreter could cause a different interpreter to be discovered. See https://docs.ansible.com/ansible-core/2.20/reference_appendices/interpreter_discovery.html for more information.
+192.168.33.10 | SUCCESS => {
+    "ansible_facts": {
+        "discovered_interpreter_python": "/usr/bin/python3.11"
+    },
+    "changed": false,
+    "ping": "pong"
+}
+```
+
+#### Простейший плейбук для проверки
+
+```yml
+---
+- hosts: vbox_hosts
+  become: true
+  tasks:
+  - name: Show hostname
+    ansible.builtin.command: hostname
+    register: hostname_result
+
+  - name: Test message
+    ansible.builtin.debug:
+      msg: "Hostname is: {{ hostname_result.stdout }}"
+```
+
+Запуск (часть вывода удалена для более компактного отображения)
+
+```bash
+# Данные для подключения к хосту указаны в инвентаре
+ansible-playbook playbook.yml -i hosts
+
+PLAY [vbox_hosts] *******************************************************
+
+TASK [Gathering Facts] **************************************************
+ok: [192.168.33.10]
+
+TASK [Show hostname] ****************************************************
+changed: [192.168.33.10]
+
+TASK [Test message] *****************************************************
+ok: [192.168.33.10] => {
+    "msg": "Hostname is: debianvm"
+}
+
+PLAY RECAP **************************************************************
+192.168.33.10              : ok=3    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
