@@ -1,0 +1,25 @@
+# php-модули, которые необходимо установить на хост
+php_modules:
+  - php-curl
+  - php-gd
+  - php-mbstring
+  - php-xml
+  - php-xmlrpc
+  - php-soap
+  - php-intl
+  - php-zip
+
+# Данные для подключения к БД (используются в конфиге wordpress.php.j2)
+mysql_db_name: wordpress_db
+mysql_user: wordpress
+mysql_password: wordpress
+mysql_root_actual_password: root
+
+# Домен, который указывается в HTTP-запросе извне
+# Запросы к этому домену обрабатывает веб-сервер Apache
+http_host: wordpress-local
+http_port: 80
+http_conf: "wordpress-local.conf"
+
+# Версия Wordpress для скачивания и установки
+wordpress_version: 6.8.1-ru_RU

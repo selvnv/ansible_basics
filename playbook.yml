@@ -1,11 +1,205 @@
 ---
-- hosts: vbox_hosts
-  become: true
-  tasks:
-  - name: Show hostname
-    ansible.builtin.command: hostname
-    register: hostname_result
 
-  - name: Test message
-    ansible.builtin.debug:
-      msg: "Hostname is: {{ hostname_result.stdout }}"
+- name: Deploy Wordpress
+  hosts: vbox_hosts
+  become: true
+  vars_files:
+    - ./vars/default.yml
+  tasks:
+
+  ### Обновление и установка зависимостей
+
+  # Обновить информацию о пакетах и обновить их
+  - name: Update apt cache and upgrade packages
+    # apt - модуль управления пакетами
+    ansible.builtin.apt:
+      update_cache: yes
+      upgrade: yes
+      # Обновить кэш только если он древнее, чем 3600 секунд
+      cache_valid_time: 3600
+
+  - name: Install LAMP-package stack
+    ansible.builtin.apt:
+      name: {{ item  }}
+      # Нужна последняя версия пакетов
+      state: latest
+    loop:
+      - apache2
+      - mysql-server
+      - php
+      - php-mysql
+      - libapache2-mod-php
+      - python3-pymysql
+
+  - name: Install PHP-extensions
+    ansible.builtin.apt:
+      name: {{ item }}
+      state: latest
+    loop: {{ php_modules }}
+
+
+  ### Конфигурирование веб-сервера Apache
+  - name: Create root directory
+    # file - модуль управления файлами/директориями
+    ansible.builtin.file:
+      # Путь, по которому нужно создать директорию
+      path: "/var/www/{{ http_host }}"
+      # Создать нужно именно директорию
+      state: directory
+      # Задать владельца и группу. www-data - специальный пользователь для веб-серверов (Apache/Nginx)
+      owner: www-data
+      group: www-data
+      # Установить права на директорию - без специальных битов. Владелец rwx, группа и остальные rx
+      mode: 0755
+
+  - name: Set Apache configuration
+    # Заполнить шаблон файла (конфигурации) и отправить его на хост
+    ansible.builtin.template:
+      # Путь к шаблону на языке Jinja2
+      src: templates/apache.conf.j2
+      # Путь, по которому нужно расположить конфиг на хосте
+      dest: "/etc/apache2/sites-available/{{ http_conf }}"
+    # Если произведена замна шаблона, выполнить перезапуск веб-сервера
+    notify: Reload Apache
+
+  # Включение модуля rewrite в в Apache, который необходим для работы человеко-понятных URL в WordPress и других CMS
+  - name: Enable Apache rewrite module
+    # Стоит убедиться, что этот модуль установлен на управляющем узле, CLI: ansible-doc -l | grep apache2_module
+    community.general.apache2_module:
+      # Имя модуля Apache
+      name: rewrite
+      # Должен быть включен
+      state: present
+    notify: Reload Apache
+
+  # Включить виртуальный хост (сделать сайт доступным)
+  - name: Make site available
+    # command - модуль для выполнения команд на хосте
+    ansible.builtin.command: a2ensite {{ http_conf }}
+    notify: Reload Apache
+
+  # Сделать недоступным дефолтный сайт веб-сервера Apache
+  - name: Disable default Apache site
+    ansible.builtin.command: a2dissite 000-default.conf
+    notify: Restart Apache
+
+
+  ### Настройка MySQL
+  - name: Set root user password
+    # Модуль для управления пользователями MySQL
+    community.mysql.mysql_user:
+      # Имя пользователя
+      name: root
+      # Пароль пользователя
+      password: "{{ mysql_root_actual_password }}"
+      # Сокет для авторизации без пароля
+      login_unix_socket: /var/run/mysqld/mysqld.sock
+      # Подключиться к базе данных под пользователем хоста root для установки пароля
+      check_implicit_admin: true
+
+  # Удалить стандартную тестовую базу данных, которая создается при установке MySQL
+  - name: Remove MySQL test database
+    # Модуль для управления базами данных MySQL
+    community.mysql.mysql_db:
+      # Имя базы данных
+      name: test
+      # Целевое состояине - удалена
+      state: absent
+      # Удаление выполняется под пользователем root
+      login_user: root
+      login_password: "{{ mysql_root_actual_password }}"
+
+  # Создать базу данных для Wordpress
+  - name: Create database for Wordpress
+    community.mysql.mysql_db:
+      # Имя базы данных взять из переменной
+      name: "{{ mysql_db_name }}"
+      # Целевое состояние - база данных присутствукет
+      state: present
+      # Создание выполняется под пользователем root
+      login_user: root
+      login_password: "{{ mysql_root_actual_password }}"
+
+  # Создать пользователя для работы с базой Wordpress
+  - name: Create database user for Wordpress
+    community.mysql.mysql_user:
+      # Имя нового пользователя взять из переменной
+      name: "{{ mysql_user }}"
+      # Пароль также взять из переменной
+      password: "{{ mysql_password }}"
+      # Установить все возможные привилегии пользователю в рамках базы данных mysql_db_name
+      priv: "{{ mysql_db_name }}.*:ALL"
+      # Целевое состояние - пользователь есть в базе
+      state: present
+      # Создание пользователя выполняется под пользователем root
+      login_user: root
+      login_password: "{{ mysql_root_actual_password }}"
+
+  # Разрешить подключение по ssh к хосту
+  - name: Allow SSH before Firewall enabled
+    # Модуль Ansible для управления UFW (Uncomplicated Firewall) - фаервол по умолчанию в Ubuntu/Debian
+    community.general.ufw:
+      # Применить правило allow - сделать порт открытым
+      rule: allow
+      port: {{ ssh_port }}
+      # SSH использует TCP в качестве протокола транспортного уровня
+      proto: tcp
+
+  # Включить фаервол на хосте
+  - name: Enable UFW
+    community.general.ufw:
+      state: enabled
+
+  # Открыть на хосте порт для доступа из вне
+  # Позволяет ограничить набор портов, доступных из вне и сделать недоступными останльные (например, порт базы данных)
+  - name: Allow HTTP on port {{ http_port }}
+    community.general.ufw:
+      rule: allow
+      # Порт для открытия
+      port: {{ http_port }}
+      # Протокол, по которому доступен порт. TCP, т.к. HTTP/HTTPS работают поверх TCP
+      proto: tcp
+
+  ### Настройка WordPress
+  - name: Download and unpack WordPress
+    # Модуль для распаковки архива после копирования на управляемый хост
+    ansible.builtin.unarchive:
+      # В качестве источника может быть директория на управляющем узле или ссылка на архив
+      src: https://wordpress.org/wordpress-{{ wordpress_version }}.tar.gz
+      # Источник архива находится не на управляющем узле, а на удаленном сервере
+      remote_src: true
+      # Директория для распаковки архива
+      dest: "/var/www/{{ http_host }}"
+      # Проверить наличие директории /var/www/{{ http_host }}/wordpress/
+      # Если присутствует, значит Wordpress уже распакован. Пропустить шаг
+      # Архив wordpress содержит внутри директорию wordpress/
+      creates: "/var/www/{{ http_host }}/wordpress/"
+
+  # Установить владельца и права для файлов и директории сервиса (Wordpress)
+  - name: Set owner and permissions for Wordpress files and dirs
+    ansible.builtin.file:
+      path: "/var/www/{{ http_host }}"
+      state: directory
+      owner: www-data
+      group: www-data
+      mode: 0755
+      # Задать владельца, группу и разрешения рекурсивно для всех файлов директории
+      recurse: true
+
+  # Задать конфигурацию Wordpress из шаблона
+  - name: Set the Wordpress configuration
+    ansible.builtin.template:
+      src: templates/wp-config.php.j2
+      # Путь, по которому нужно расположить конфиг на хосте
+      # WordPress жестко закодирован на поиск файла с именем wp-config.php в корневой директории
+      dest: "/var/www/{{ http_host }}/wordpress/wp-config.php"
+    # Если произведена замна шаблона, выполнить перезапуск веб-сервера
+    notify: Reload Apache
+
+  handlers:
+    - name: Reload Apache
+      # service - модуль управления службами
+      ansible.builtin.service:
+        name: apache2
+        # Перезапустить службу (запустит, если ещё не стартовала)
+        state: reloaded
